@@ -1,0 +1,51 @@
+# basic ok
+architecture: KPTDETR
+pretrain_weights: https://paddledet.bj.bcebos.com/models/pretrained/ResNet50_cos_pretrained.pdparams
+hidden_dim: 256
+
+# arch ok
+KPTDETR:
+  backbone: ResNet
+  transformer: GroupPoseTransformer
+  detr_head: GroupPoseHead
+  post_process: DETRKeypointPostProcess
+
+# resent ok
+ResNet:
+  # index 0 stands for res2
+  depth: 50
+  norm_type: bn
+  freeze_norm: True
+  return_idx: [1, 2, 3]
+  lr_mult_list: [0.0, 0.1, 0.1, 0.1]
+
+GroupPoseTransformer:
+  num_classes: 2
+  num_queries: 100
+  dim_feedforward: 2048
+  pe_temperature: 20
+  pe_offset: 0.0
+  num_body_points: 17
+
+GroupPoseHead:
+  loss:
+    name: GroupPoseLoss
+    num_classes: 2
+    num_body_points: 17
+    loss_coeff: {class: 2.0, keypoint: 10.0, oks: 4.0}
+    aux_loss: True
+    alpha: 0.25
+    gamma: 2.0
+    # matcher ok
+    matcher:
+      name: HungarianKeypointMatcher
+      matcher_coeff: {class: 2.0, keypoint: 10.0, oks: 4.0}
+      num_body_points: 17
+      alpha: 0.25
+      gamma: 2.0
+
+# postprocess ok
+DETRKeypointPostProcess:
+  num_classes: 2
+  num_top_queries: 50
+  num_body_points: 17

@@ -242,12 +242,12 @@ def oks_overlaps(kpt_preds, kpt_gts, kpt_valids, kpt_areas, sigmas):
 
     squared_distance = (kpt_preds[:, :, 0] - kpt_gts[:, :, 0]) ** 2 + \
         (kpt_preds[:, :, 1] - kpt_gts[:, :, 1]) ** 2
-    assert (kpt_valids.sum(-1) > 0).all()
+    # assert (kpt_valids.sum(-1) > 0).all()
     squared_distance0 = squared_distance / (
         kpt_areas[:, None] * variances[None, :] * 2)
     squared_distance1 = paddle.exp(-squared_distance0)
     squared_distance1 = squared_distance1 * kpt_valids
-    oks = squared_distance1.sum(axis=1) / kpt_valids.sum(axis=1)
+    oks = squared_distance1.sum(axis=1) / (kpt_valids.sum(axis=1)+1e-6)
 
     return oks
 

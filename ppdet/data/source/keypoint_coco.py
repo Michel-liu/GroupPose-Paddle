@@ -722,3 +722,55 @@ class KeypointTopDownMPIIDataset(KeypointTopDownBaseDataset):
             })
         print("number length: {}".format(len(gt_db)))
         self.db = gt_db
+
+
+@register
+@serializable
+class KeypointGroupPoseDataset(KeypointBottomUpCocoDataset):
+    def __init__(self,
+                 dataset_dir,
+                 image_dir,
+                 anno_path,
+                 num_joints,
+                 transform=[],
+                 shard=[0, 1],
+                 test_mode=False,
+                 return_mask=True,
+                 return_bbox=True,
+                 return_area=True,
+                 return_class=True):
+        super().__init__(dataset_dir, image_dir, anno_path, num_joints, transform, shard, 
+                         test_mode, return_mask, return_bbox, return_area, return_class)
+
+        self.ann_file = os.path.join(dataset_dir, anno_path)
+        self.shard = shard
+        self.test_mode = test_mode
+
+    def parse_dataset(self):
+        self.coco = COCO(self.ann_file)
+
+        self.img_ids = self.coco.getImgIds()
+        if not self.test_mode:
+            self.img_ids_tmp = []
+            for img_id in self.img_ids:
+                ann_ids = self.coco.getAnnIds(imgIds=img_id)
+                anno = self.coco.loadAnns(ann_ids)
+                anno = [obj for obj in anno if obj['iscrowd'] == 0]
+                if len(anno) == 0:
+                    continue
+                num_keypoints = [obj["num_keypoints"] for obj in anno]
+                if sum(num_keypoints) == 0:
+                    continue
+                self.img_ids_tmp.append(img_id)
+            self.img_ids = self.img_ids_tmp
+
+        blocknum = int(len(self.img_ids) / self.shard[1])
+        self.img_ids = self.img_ids[(blocknum * self.shard[0]):(blocknum * (
+            self.shard[0] + 1))]
+        self.num_images = len(self.img_ids)
+        self.id2name, self.name2id = self._get_mapping_id_name(self.coco.imgs)
+        self.dataset_name = 'coco'
+
+        cat_ids = self.coco.getCatIds()
+        self.catid2clsid = dict({catid: i for i, catid in enumerate(cat_ids)})
+        print('=> num_images: {}'.format(self.num_images))

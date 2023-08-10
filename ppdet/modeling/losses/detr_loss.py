@@ -21,9 +21,10 @@ import paddle.nn as nn
 import paddle.nn.functional as F
 from ppdet.core.workspace import register
 from .iou_loss import GIoULoss
+from .keypoint_loss import OKSLoss
 from ..transformers import bbox_cxcywh_to_xyxy, sigmoid_focal_loss
 
-__all__ = ['DETRLoss', 'DINOLoss']
+__all__ = ['DETRLoss', 'DINOLoss', 'GroupPoseLoss']
 
 
 @register
@@ -326,5 +327,183 @@ class DINOLoss(DETRLoss):
             dn_match_indices=dn_match_indices,
             dn_num_group=dn_num_group)
         total_loss.update(dn_loss)
+
+        return total_loss
+
+
+@register
+class GroupPoseLoss(nn.Layer):
+    __shared__ = ['num_classes']
+    __inject__ = ['matcher']
+    
+    def __init__(self,
+                 num_classes=2,
+                 num_body_points=17,
+                 matcher='HungarianKeypointMatcher',
+                 loss_coeff={
+                    'class': 2.0, 
+                    'keypoint': 10.0, 
+                    'oks': 4.0
+                 },
+                 aux_loss=True,
+                 alpha=0.25,
+                 gamma=2.0):
+        super(GroupPoseLoss, self).__init__()
+        self.num_classes = num_classes
+        self.num_body_points = num_body_points
+        self.matcher = matcher
+        self.loss_coeff = loss_coeff
+        self.aux_loss = aux_loss
+        self.alpha = alpha
+        self.gamma = gamma
+        self.oks_loss = OKSLoss(linear=True,
+                                num_keypoints=num_body_points,
+                                eps=1e-6,
+                                reduction='none',
+                                loss_weight=1.0)
+        
+    def _get_src_target_assign(self, src, tgt_keypoint, tgt_area, match_indices):
+        src_assign = paddle.concat([
+            paddle.gather(
+                t, I, axis=0) if len(I) > 0 else paddle.zeros([0] + t.shape[-2:])
+            for t, (I, _) in zip(src, match_indices)
+        ])
+        target_assign = paddle.concat([
+            paddle.gather(
+                t, J, axis=0) if len(J) > 0 else paddle.zeros([0] + t.shape[-2:])
+            for t, (_, J) in zip(tgt_keypoint, match_indices)
+        ])
+        area_assign = paddle.concat([
+            paddle.gather(
+                t, J, axis=0) if len(J) > 0 else paddle.zeros([0, t.shape[-1]])
+            for t, (_, J) in zip(tgt_area, match_indices)
+        ])
+        return src_assign, target_assign, area_assign
+    
+    def _get_index_updates(self, num_query_objects, target, match_indices):
+        batch_idx = paddle.concat([
+            paddle.full_like(src, i) for i, (src, _) in enumerate(match_indices)
+        ])
+        src_idx = paddle.concat([src for (src, _) in match_indices])
+        src_idx += (batch_idx * num_query_objects)
+        target_assign = paddle.concat([
+            paddle.gather(
+                t, dst, axis=0) for t, (_, dst) in zip(target, match_indices)
+        ])
+        return src_idx, target_assign
+    
+    def _get_loss_aux(self,
+                      keypoints,
+                      logits,
+                      targets,
+                      num_gts,
+                      postfix=""):
+        if keypoints is None or logits is None:
+            return {
+                "loss_class_aux" + postfix: paddle.paddle.zeros([1]),
+                "loss_keypoint_aux" + postfix: paddle.paddle.zeros([1]),
+                "loss_oks_aux" + postfix: paddle.paddle.zeros([1])
+            }
+        loss_class = []
+        loss_keypoint = []
+        loss_oks = []
+        for aux_keypoints, aux_logits in zip(keypoints, logits):
+            match_indices = self.matcher(aux_keypoints.detach(), aux_logits.detach(), targets)
+            loss_class.append(
+                self._get_loss_class(aux_logits, targets, match_indices, num_gts)['loss_class'])
+            loss_ = self._get_loss_keypoint(aux_keypoints, targets, match_indices, num_gts)
+            loss_keypoint.append(loss_['loss_keypoint'])
+            loss_oks.append(loss_['loss_oks'])
+        loss = {
+            "loss_class_aux" + postfix: paddle.add_n(loss_class),
+            "loss_keypoint_aux" + postfix: paddle.add_n(loss_keypoint),
+            "loss_oks_aux" + postfix: paddle.add_n(loss_oks)
+        }
+        return loss
+    
+    def _get_loss_class(self,
+                        logits,
+                        targets,
+                        match_indices,
+                        num_gts,
+                        postfix=""):
+        # logits: [b, query, num_classes], gt_class: list[[n, 1]]
+        name_class = "loss_class" + postfix
+        if logits is None:
+            return {name_class: paddle.zeros([1])}
+        
+        target_label = paddle.full(logits.shape[:2], self.num_classes, dtype='int64')
+        bs, num_query_objects = target_label.shape
+        if sum(len(v) for v in targets["gt_joints"]) > 0:
+            index, updates = self._get_index_updates(num_query_objects,
+                                                     targets["gt_class"], match_indices)
+            target_label = paddle.scatter(
+                target_label.reshape([-1, 1]), index, updates.astype('int64'))
+            target_label = target_label.reshape([bs, num_query_objects])
+        target_label = F.one_hot(target_label, self.num_classes + 1)[..., :-1]
+        return {
+            name_class: self.loss_coeff['class'] * sigmoid_focal_loss(
+                logits, target_label, num_gts / num_query_objects, alpha=self.alpha, gamma=self.gamma)
+        }
+    
+    def _get_loss_keypoint(self, keypoints, targets, match_indices, num_gts,
+                       postfix=""):
+        # keypoint loss: L1 & OKS
+        assert "gt_joints" in targets
+        name_keypoint = "loss_keypoint" + postfix
+        name_oks = "loss_oks" + postfix
+        if keypoints is None:
+            return {name_keypoint: paddle.zeros([1]), name_oks: paddle.zeros([1])}
+        loss = dict()
+        if sum(len(v) for v in targets["gt_joints"]) == 0:
+            loss[name_keypoint] = paddle.to_tensor([0.]) * keypoints.sum() * 0.
+            loss[name_oks] = paddle.to_tensor([0.]) * keypoints.sum() * 0.
+            return loss
+        
+        src_keypoint, tgt_keypoint, tgt_area = self._get_src_target_assign(keypoints, targets["gt_joints"], targets["gt_areas"], match_indices)
+        vis_keypoint = tgt_keypoint[..., -1].clip(max=1.0)
+        tgt_keypoint = tgt_keypoint[..., :2]
+        # print(src_keypoint)
+        # print(tgt_keypoint)
+        
+        for x, y in zip(src_keypoint, tgt_keypoint):
+            print(x, y)
+        
+        exit()
+        
+        loss[name_keypoint] = self.loss_coeff['keypoint'] * F.l1_loss(
+            src_keypoint.flatten(-2), tgt_keypoint.flatten(-2), reduction='none')
+        
+        loss[name_keypoint] = loss[name_keypoint] * vis_keypoint.repeat_interleave(2, axis=-1)
+        loss[name_keypoint] = loss[name_keypoint].sum() / num_gts
+        loss[name_oks] = self.loss_coeff['oks'] * self.oks_loss(src_keypoint.flatten(-2), tgt_keypoint.flatten(-2), vis_keypoint, tgt_area)
+        loss[name_oks] = loss[name_oks].sum() / num_gts
+        
+        return loss
+    
+    def forward(self,
+                keypoints,
+                logits,
+                targets,
+                **kwargs):
+        # Compute the average number of target boxes accross all nodes, for normalization purposes
+        num_gts = sum(len(v) for v in targets["gt_joints"])
+        num_gts = paddle.to_tensor([num_gts], dtype="float32")
+        if paddle.distributed.get_world_size() > 1:
+            paddle.distributed.all_reduce(num_gts)
+            num_gts /= paddle.distributed.get_world_size()
+        num_gts = paddle.clip(num_gts, min=1.)
+        
+        # loss for final layer
+        match_indices = self.matcher(keypoints[-1].detach(), logits[-1].detach(), targets)
+        
+        total_loss = dict()
+        total_loss.update(self._get_loss_class(logits[-1], targets, match_indices, num_gts))
+        total_loss.update(self._get_loss_keypoint(keypoints[-1], targets, match_indices, num_gts))
+        exit()
+        
+        if self.aux_loss:
+            total_loss.update(
+                self._get_loss_aux(keypoints[:-1], logits[:-1], targets, num_gts))
 
         return total_loss

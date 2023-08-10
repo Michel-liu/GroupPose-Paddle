@@ -24,7 +24,7 @@ import pycocotools.mask as mask_util
 from ..initializer import linear_init_, constant_
 from ..transformers.utils import inverse_sigmoid
 
-__all__ = ['DETRHead', 'DeformableDETRHead', 'DINOHead']
+__all__ = ['DETRHead', 'DeformableDETRHead', 'DINOHead', 'GroupPoseHead']
 
 
 class MLP(nn.Layer):
@@ -402,3 +402,28 @@ class DINOHead(nn.Layer):
                 dn_meta=dn_meta)
         else:
             return (dec_out_bboxes[-1], dec_out_logits[-1], None)
+
+
+@register
+class GroupPoseHead(nn.Layer):
+    __inject__ = ['loss']
+
+    def __init__(self, loss='GroupPoseLoss'):
+        super(GroupPoseHead, self).__init__()
+        self.loss = loss
+
+    def forward(self, out_transformer, inputs=None):
+        (dec_out_keypoints, dec_out_logits, enc_topk_keypoints, enc_topk_logits) = out_transformer
+        if self.training:
+            assert inputs is not None
+            out_keypoints = paddle.concat(
+                [enc_topk_keypoints.unsqueeze(0), dec_out_keypoints])
+            out_logits = paddle.concat(
+                [enc_topk_logits.unsqueeze(0), dec_out_logits])
+
+            return self.loss(
+                out_keypoints,
+                out_logits,
+                inputs)
+        else:
+            return (dec_out_keypoints[-1], dec_out_logits[-1], None)

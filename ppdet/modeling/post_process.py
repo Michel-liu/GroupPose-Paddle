@@ -26,7 +26,8 @@ except Exception:
 
 __all__ = [
     'BBoxPostProcess', 'MaskPostProcess', 'JDEBBoxPostProcess',
-    'CenterNetPostProcess', 'DETRBBoxPostProcess', 'SparsePostProcess'
+    'CenterNetPostProcess', 'DETRBBoxPostProcess', 'SparsePostProcess',
+    'DETRKeypointPostProcess'
 ]
 
 
@@ -686,3 +687,40 @@ def nms(dets, match_threshold=0.6, match_metric='iou'):
     keep = np.where(suppressed == 0)[0]
     dets = dets[keep, :]
     return dets
+
+
+@register
+class DETRKeypointPostProcess(object):
+    __shared__ = ['num_classes']
+    __inject__ = []
+
+    def __init__(self,
+                 num_classes=2,
+                 num_top_queries=100,
+                 num_body_points=17):
+        super(DETRKeypointPostProcess, self).__init__()
+        self.num_classes = num_classes
+        self.num_top_queries = num_top_queries
+        self.num_body_points = num_body_points
+
+    def __call__(self, logits, keypoints, targets):
+        
+        origin_shape = paddle.floor(targets["im_shape"] / targets["scale_factor"] + 0.5)
+        img_h, img_w = paddle.split(origin_shape, 2, axis=-1)
+        origin_shape = paddle.concat([img_w, img_h], axis=-1).reshape([-1, 1, 2])
+        
+        assert len(logits) == len(origin_shape)
+
+        prob = logits.sigmoid()
+        scores, index = paddle.topk(prob.flatten(1), self.num_top_queries, axis=1)
+
+        index = index // self.num_classes
+        labels = index % self.num_classes
+        batch_ind = paddle.arange(end=scores.shape[0]).unsqueeze(-1).tile(
+                [1, self.num_top_queries])
+        index = paddle.stack([batch_ind, index], axis=-1)
+        keypoint_pred = paddle.gather_nd(keypoints, index)
+        keypoint_pred = keypoint_pred * origin_shape.repeat_interleave(self.num_body_points, axis=1)[:, None]
+        keypoint_pred = paddle.concat([keypoint_pred, paddle.ones_like(scores[..., None, None].repeat_interleave(self.num_body_points, axis=2))], axis=-1)
+        
+        return [[k.numpy(), s.numpy()] for k, s in zip(keypoint_pred, scores)] 

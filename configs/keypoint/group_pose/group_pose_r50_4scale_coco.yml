@@ -1,0 +1,15 @@
+_BASE_: [
+  '_base_/optimizer.yml',
+  '_base_/group_pose_r50.yml',
+  '_base_/group_pose_reader.yml',
+  '_base_/coco_keypoint.yml'
+]
+
+use_gpu: True
+log_iter: 10
+save_dir: output
+snapshot_epoch: 1
+weights: output/resnet50.pdparams
+find_unused_parameters: False
+metric: COCO
+num_classes: 2

@@ -1,0 +1,61 @@
+worker_num: 0
+global_mean: &global_mean [0.485, 0.456, 0.406]
+global_std: &global_std [0.229, 0.224, 0.225]
+flip_perm: &flip_perm [0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15]
+
+
+TrainReader:
+  sample_transforms:
+    - Decode: {}
+    - KeyPointFlip:
+        flip_prob: 0.5
+        flip_permutation: *flip_perm
+    - RandomSelect: { transforms1: [ RandomShortSideResize: { short_side_sizes: [ 480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800 ], max_size: 1333 } ],
+                      transforms2: [
+                          RandomShortSideResize: { short_side_sizes: [ 400, 500, 600 ] },
+                          RandomSizeCrop: { min_size: 384, max_size: 600 },
+                          RandomShortSideResize: { short_side_sizes: [ 480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800 ], max_size: 1333 } ]
+    }
+    - NormalizeImage: {mean: *global_mean, std: *global_std, is_scale: True}
+    - NormalizeKeypointAreaCategory: {}
+    - Permute: {}
+  batch_transforms:
+    - PadMaskBatch: {pad_to_stride: -1, return_pad_mask: True}
+    - FieldRemoveBatch: {remove_fields: ["image_file"]}
+  batch_size: 2
+  shuffle: True
+  drop_last: True
+  collate_batch: False
+  use_shared_memory: False
+
+
+EvalReader:
+  sample_transforms:
+  - Decode: {}
+  - Resize: {target_size: [800, 1333], keep_ratio: True}
+  - NormalizeImage: {is_scale: True, mean: *global_mean, std: *global_std}
+  - Permute: {}
+  batch_transforms:
+  - PadMaskBatch: {pad_to_stride: -1, return_pad_mask: true}
+  - FieldRemoveBatch: {remove_fields: ["image_file"]}
+  batch_size: 2
+  shuffle: False
+  drop_last: False
+  collate_batch: False
+  use_shared_memory: False
+
+
+TestReader:
+  sample_transforms:
+  - Decode: {}
+  - Resize: {target_size: [800, 1333], keep_ratio: True}
+  - NormalizeImage: {is_scale: True, mean: *global_mean, std: *global_std}
+  - Permute: {}
+  batch_transforms:
+  - PadMaskBatch: {pad_to_stride: -1, return_pad_mask: true}
+  - FieldRemoveBatch: {remove_fields: ["image_file"]}
+  batch_size: 2
+  shuffle: False
+  drop_last: False
+  collate_batch: False
+  use_shared_memory: False

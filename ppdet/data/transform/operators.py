@@ -4062,3 +4062,30 @@ class RandomErasingCrop(BaseOperator):
         sample = self.transform2(sample)
         sample = self.transform3(sample)
         return sample
+
+
+@register_op
+class NormalizeKeypointAreaCategory(BaseOperator):
+    def __init__(self):
+        super(NormalizeKeypointAreaCategory, self).__init__()
+
+    def apply(self, sample, context=None):
+        h, w = sample['image'].shape[:2]
+        if "gt_areas" in sample:
+            area = sample["gt_areas"]
+            area = area / np.float32(w * h)
+            sample["gt_areas"] = area
+
+        if "gt_joints" in sample:
+            keypoints = sample["gt_joints"]
+            V = keypoints[:, :, -1:]
+            Z = keypoints[:, :, :2]
+            scale = np.array([w, h], dtype=np.float32)[None, None]
+            Z = Z / scale
+            keypoints = np.concatenate((Z, V), axis=-1)
+            sample["gt_joints"] = keypoints
+        
+        if "gt_class" in sample:
+            sample["gt_class"] = sample["gt_class"].clip(min=1)
+        
+        return sample

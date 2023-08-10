@@ -51,6 +51,7 @@ __all__ = [
     'Gt2CenterTrackTarget',
     'PadGT',
     'PadRGT',
+    'FieldRemoveBatch'
 ]
 
 
@@ -1482,3 +1483,31 @@ class Gt2CenterTrackTarget(BaseOperator):
 
         del sample
         return new_sample
+
+
+@register_op
+class FieldRemoveBatch(BaseOperator):
+    """
+    Pad a batch of samples so they can be divisible by a stride.
+    The layout of each image should be 'CHW'.
+    Args:
+        pad_to_stride (int): If `pad_to_stride > 0`, pad zeros to ensure
+            height and width is divisible by `pad_to_stride`.
+        return_pad_mask (bool): If `return_pad_mask = True`, return
+            `pad_mask` for transformer.
+    """
+
+    def __init__(self, remove_fields=[]):
+        super(FieldRemoveBatch, self).__init__()
+        self.remove_fields = remove_fields
+
+    def __call__(self, samples, context=None):
+        """
+        Args:
+            samples (list): a batch of sample, each is dict.
+        """
+        for data in samples:
+            for fields in self.remove_fields:
+                del data[fields]
+
+        return samples

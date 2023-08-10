@@ -28,7 +28,7 @@ from ppdet.core.workspace import register, serializable
 from ..losses.iou_loss import GIoULoss
 from .utils import bbox_cxcywh_to_xyxy
 
-__all__ = ['HungarianMatcher']
+__all__ = ['HungarianMatcher', 'HungarianKeypointMatcher']
 
 
 @register
@@ -120,6 +120,108 @@ class HungarianMatcher(nn.Layer):
         indices = [
             linear_sum_assignment(c.split(sizes, -1)[i].numpy())
             for i, c in enumerate(C)
+        ]
+        return [(paddle.to_tensor(
+            i, dtype=paddle.int64), paddle.to_tensor(
+                j, dtype=paddle.int64)) for i, j in indices]
+
+
+@register
+@serializable
+class HungarianKeypointMatcher(nn.Layer):
+    def __init__(self,
+                 matcher_coeff={'class': 1,
+                                'keypoint': 5,
+                                'oks': 2},
+                 num_body_points=17,
+                 alpha=0.25,
+                 gamma=2.0):
+        r"""
+        Args:
+            matcher_coeff (dict): The coefficient of hungarian matcher cost.
+        """
+        super(HungarianKeypointMatcher, self).__init__()
+        self.matcher_coeff = matcher_coeff
+        self.alpha = alpha
+        self.gamma = gamma
+        
+        if num_body_points==17:
+            self.sigmas = [
+                .26, .25, .25, .35, .35, .79, .79, .72, .72, .62, .62, 1.07,
+                1.07, .87, .87, .89, .89
+            ]
+        elif num_body_points==14:
+            self.sigmas = [
+                .79, .79, .72, .72, .62, .62, 1.07, 1.07, .87, .87, .89, .89,
+                .79, .79
+            ]
+        else:
+            raise NotImplementedError
+
+    def forward(self, keypoints, logits, targets):
+        r"""
+        Returns:
+            A list of size batch_size, containing tuples of (index_i, index_j) where:
+                - index_i is the indices of the selected predictions (in order)
+                - index_j is the indices of the corresponding selected targets (in order)
+            For each batch element, it holds:
+                len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
+        """
+        bs, num_queries = keypoints.shape[:2]
+        
+        # gt_keypoint, gt_areas, gt_class
+        num_gts = sum(len(v) for v in targets["gt_bbox"])
+        if num_gts == 0:
+            return [(paddle.to_tensor(
+                [], dtype=paddle.int64), paddle.to_tensor(
+                    [], dtype=paddle.int64)) for _ in range(bs)]
+            
+        # We flatten to compute the cost matrices in a batch
+        # [batch_size * num_queries, num_classes]
+        out_prob = F.sigmoid(logits.flatten(0, 1))
+        # [batch_size * num_queries, 4]
+        out_keypoints = keypoints.flatten(0, 1)
+            
+        # Also concat the target labels, keypoints and areas
+        tgt_ids = paddle.concat([v for v in targets["gt_class"]]).flatten().astype("int")
+        tgt_keypoints = paddle.concat([v for v in targets["gt_joints"]])
+        tgt_areas = paddle.concat([v for v in targets["gt_areas"]])
+
+        # Compute the classification cost
+        neg_cost_class = (1 - self.alpha) * (out_prob**self.gamma) * (-(
+            1 - out_prob + 1e-8).log())
+        pos_cost_class = self.alpha * (
+            (1 - out_prob)**self.gamma) * (-(out_prob + 1e-8).log())
+        cost_class = paddle.gather(
+            pos_cost_class, tgt_ids, axis=1) - paddle.gather(
+                neg_cost_class, tgt_ids, axis=1)
+
+        # Compute the keypoint costs
+        vis_keypoints = tgt_keypoints[..., -1].clip(max=1.0)
+        tgt_keypoints = tgt_keypoints[..., :2]
+        
+        sigmas = paddle.to_tensor(self.sigmas, place=out_prob.place) / 10
+        variances = (sigmas * 2) ** 2
+        squared_distance = (out_keypoints[:, None, :, 0] - tgt_keypoints[None, :, :, 0]) ** 2 + \
+                            (out_keypoints[:, None, :, 1] - tgt_keypoints[None, :, :, 1]) ** 2
+        squared_distance0 = squared_distance / (tgt_areas[:, None] * variances[None, :] * 2)
+        squared_distance1 = paddle.exp(-squared_distance0)
+        squared_distance1 = squared_distance1 * vis_keypoints
+        oks = squared_distance1.sum(axis=-1) / (vis_keypoints.sum(axis=-1) + 1e-6)
+        cost_oks = 1 - oks.clip(min=1e-6)
+        
+        cost_keypoints = paddle.abs(out_keypoints[:, None, :] - tgt_keypoints[None])
+        cost_keypoints = cost_keypoints * vis_keypoints[..., None].repeat_interleave(2, axis=-1)[None]
+        cost_keypoints = cost_keypoints.flatten(-2, -1).sum(-1)
+
+        # Final cost matrix
+        C = self.matcher_coeff["class"] * cost_class + self.matcher_coeff["keypoint"] * cost_keypoints + self.matcher_coeff["oks"] * cost_oks
+        C = C.reshape([bs, num_queries, -1])
+
+        sizes = [len(v) for v in targets["gt_bbox"]]
+        indices = [
+            linear_sum_assignment(c[i])
+            for i, c in enumerate(C.split(sizes, -1))
         ]
         return [(paddle.to_tensor(
             i, dtype=paddle.int64), paddle.to_tensor(
