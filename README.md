@@ -1,13 +1,13 @@
 # Group Pose
 
-This repository is an official paddlepaddle implementation of the ICCV 2023 paper "[Group Pose: A Simple Baseline for End-to-End Multi-person Pose Estimation]()".
+This repository is an official paddlepaddle implementation of the ICCV 2023 paper "[Group Pose: A Simple Baseline for End-to-End Multi-person Pose Estimation](https://arxiv.org/pdf/2308.07313.pdf)".
 
 ☀️ If you find this work useful for your research, please kindly star our repo and cite our paper! ☀️
 
 ### TODO
 We are working hard on following items.
 
-- [ ] Release arXiv paper 
+- [x] Release [arXiv paper](https://arxiv.org/pdf/2308.07313.pdf)
 - [x] Release [PyTorch scripts](https://github.com/Michel-liu/GroupPose)
 
 ## Introduction
